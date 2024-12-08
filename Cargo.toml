@@ -12,8 +12,10 @@ chrono = "0.4"
 futures = "0.3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "aio"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 serde_json = "1"
 solana-account-decoder-client-types = "2"
 solana-client = { version = "2" }
@@ -23,12 +25,3 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-serde_bytes = "0.11"
-
-[[bin]]
-name = "market-cache"
-path = "src/main.rs"
-
-[lib]
-name = "market_cache"
-path = "src/lib.rs"

@@ -8,6 +8,10 @@ pub enum CacheError {
     PubkeyParseError(String),
     #[error("Server error: {0}")]
     ServerError(#[from] std::io::Error),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::error::Error),
+    #[error("Redis error: {0}")]
+    RedisError(#[from] redis::RedisError),
     #[error("Other error: {0}")]
     Other(#[from] anyhow::Error),
 }

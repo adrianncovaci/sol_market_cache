@@ -37,12 +37,13 @@ pub struct AccountParams {
     pub serum_vault_signer: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CacheConfig {
-    pub refresh_interval: Duration,
     pub request_timeout: Duration,
-    pub max_retries: u32,
+    pub refresh_interval: Duration,
     pub retry_delay: Duration,
+    pub max_retries: u32,
+    pub cache_ttl: Option<Duration>, // TTL for Redis cache entries
 }
 
 impl Default for CacheConfig {
@@ -52,6 +53,7 @@ impl Default for CacheConfig {
             request_timeout: Duration::from_secs(60),
             max_retries: 3,
             retry_delay: Duration::from_secs(1),
+            cache_ttl: Some(Duration::from_secs(60 * 60)),
         }
     }
 }

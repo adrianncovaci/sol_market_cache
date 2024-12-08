@@ -1,5 +1,5 @@
-use crate::{CacheConfig, CacheError, MarketAccount};
 use metrics::{counter, gauge};
+use redis::AsyncCommands;
 use solana_account_decoder_client_types::{UiAccountEncoding, UiDataSliceConfig};
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
@@ -9,11 +9,16 @@ use std::{collections::HashSet, str::FromStr, sync::Arc, time::Instant};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
+use crate::error::CacheError;
+use crate::types::{CacheConfig, MarketAccount};
+
 pub struct MarketCache {
     markets: Arc<RwLock<HashSet<MarketAccount>>>,
     rpc_client: Arc<RpcClient>,
     pubkeys_index: Arc<RwLock<HashSet<Pubkey>>>,
     config: CacheConfig,
+    redis_client: Arc<redis::Client>,
+    redis_connection: Arc<RwLock<redis::aio::MultiplexedConnection>>,
 }
 
 impl From<(Pubkey, Account)> for MarketAccount {
@@ -33,9 +38,10 @@ impl From<(Pubkey, Account)> for MarketAccount {
 }
 
 impl MarketCache {
-    pub fn new(
+    pub async fn new(
         rpc_url: String,
         pubkeys: HashSet<String>,
+        redis_url: String,
         config: Option<CacheConfig>,
     ) -> Result<Self, CacheError> {
         let config = config.unwrap_or_default();
@@ -45,11 +51,19 @@ impl MarketCache {
             .map(|x| Pubkey::from_str(x).map_err(|_| CacheError::PubkeyParseError(x.clone())))
             .collect::<Result<HashSet<_>, _>>()?;
 
+        let redis_client = redis::Client::open(redis_url).map_err(|e| CacheError::RedisError(e))?;
+        let redis_connection = redis_client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| CacheError::RedisError(e))?;
+
         Ok(Self {
             markets: Arc::new(RwLock::new(HashSet::new())),
             rpc_client: Arc::new(RpcClient::new_with_timeout(rpc_url, config.request_timeout)),
             pubkeys_index: Arc::new(RwLock::new(pubkeys_index)),
             config,
+            redis_client: Arc::new(redis_client),
+            redis_connection: Arc::new(RwLock::new(redis_connection)),
         })
     }
 
@@ -168,5 +182,32 @@ impl MarketCache {
 
     pub async fn get_markets(&self) -> HashSet<MarketAccount> {
         self.markets.read().await.clone()
+    }
+
+    async fn store_in_redis(
+        &self,
+        program_id: &Pubkey,
+        accounts: &[MarketAccount],
+    ) -> Result<(), CacheError> {
+        let accounts_json =
+            serde_json::to_string(&accounts).map_err(CacheError::SerializationError)?;
+
+        self.redis_connection
+            .write()
+            .await
+            .set(program_id.to_string(), accounts_json)
+            .await
+            .map_err(CacheError::RedisError)?;
+
+        if let Some(ttl) = self.config.cache_ttl {
+            self.redis_connection
+                .write()
+                .await
+                .expire(program_id.to_string(), ttl.as_secs() as i64)
+                .await
+                .map_err(CacheError::RedisError)?;
+        }
+
+        Ok(())
     }
 }

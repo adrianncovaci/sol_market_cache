@@ -1,0 +1,15 @@
+/target
+.DS_Store
+viz_diagram/viz_accs/
+
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+
+**/dist/
+**/build/
+**/*.egg-info/
+**/*.egg
+
+**/.env
+**/.env.local

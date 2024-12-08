@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use solana_program::pubkey::Pubkey;
-use std::time::{Duration, Instant};
+use std::{
+    sync::{atomic::AtomicU64, Arc},
+    time::{Duration, Instant},
+};
+use tokio::sync::RwLock;
+
+use crate::error::CacheError;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
 pub struct MarketAccount {
@@ -37,21 +43,50 @@ pub struct AccountParams {
     pub serum_vault_signer: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CacheConfig {
-    pub refresh_interval: Duration,
     pub request_timeout: Duration,
-    pub max_retries: u32,
+    pub refresh_interval: Duration,
     pub retry_delay: Duration,
+    pub max_retries: u32,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             refresh_interval: Duration::from_secs(10),
-            request_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(5 * 60),
             max_retries: 3,
             retry_delay: Duration::from_secs(1),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct RedisConfig {
+    pub url: String,
+    pub cache_ttl: Duration,
+    pub redis_client: Arc<redis::Client>,
+    pub redis_connection: Arc<RwLock<redis::aio::MultiplexedConnection>>,
+    pub update_duration: Duration,
+    pub last_updated: Option<AtomicU64>,
+}
+
+impl RedisConfig {
+    pub async fn new(
+        url: String,
+        cache_ttl: Duration,
+        update_duration: Duration,
+    ) -> Result<Self, CacheError> {
+        let redis_client = redis::Client::open(url.clone())?;
+        let redis_connection = redis_client.get_multiplexed_async_connection().await?;
+        Ok(Self {
+            url,
+            cache_ttl,
+            redis_client: Arc::new(redis_client),
+            redis_connection: Arc::new(RwLock::new(redis_connection)),
+            update_duration,
+            last_updated: None,
+        })
     }
 }

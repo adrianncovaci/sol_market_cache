@@ -1,8 +1,12 @@
-use crate::types::MarketAccount;
-use crate::MarketCache;
+use crate::{cache::MarketCache, types::MarketAccount};
 use anyhow::{Context, Result};
 use axum::{extract::State, routing::get, Json, Router};
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use solana_sdk::pubkey::Pubkey;
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -24,7 +28,9 @@ pub async fn serve(cache: Arc<MarketCache>) -> Result<()> {
     Ok(())
 }
 
-async fn get_markets(State(cache): State<Arc<MarketCache>>) -> Json<HashSet<MarketAccount>> {
+async fn get_markets(
+    State(cache): State<Arc<MarketCache>>,
+) -> Json<HashMap<Pubkey, HashSet<MarketAccount>>> {
     let markets = cache.get_markets().await;
     Json(markets)
 }

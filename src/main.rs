@@ -1,6 +1,6 @@
 use anyhow::Result;
-use market_cache::{CacheConfig, MarketCache};
-use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
+use jup_cache_tracker::{cache::MarketCache, server, types::CacheConfig};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -15,21 +15,19 @@ async fn main() -> Result<()> {
     let markets_txt = include_str!("cache_markets.json");
     let indexed_pubkeys: HashSet<String> = serde_json::from_str(markets_txt)?;
 
-    let config = CacheConfig {
-        refresh_interval: Duration::from_secs(10),
-        request_timeout: Duration::from_secs(60),
-        max_retries: 3,
-        retry_delay: Duration::from_secs(1),
-    };
-
-    let cache = Arc::new(MarketCache::new(
-        "rpc".to_string(),
+    let config = CacheConfig::default();
+    let cache = MarketCache::new(
+        "http://localhost".to_string(),
         indexed_pubkeys,
+        "redis://localhost".to_string(),
         Some(config),
-    )?);
+    )
+    .await?;
+
+    let cache = Arc::new(cache);
 
     cache.clone().start_background_refresh().await;
-    market_cache::serve(cache).await?;
+    server::serve(cache).await?;
 
     Ok(())
 }

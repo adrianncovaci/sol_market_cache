@@ -337,14 +337,6 @@ impl MarketCache {
         }
     }
 
-    fn decode_account_data(data_str: &str, encoding: UiAccountEncoding) -> Option<Vec<u8>> {
-        match encoding {
-            UiAccountEncoding::Base64 => base64::decode(data_str).ok(),
-            UiAccountEncoding::Base58 => bs58::decode(data_str).into_vec().ok(),
-            _ => None,
-        }
-    }
-
     async fn start_subscriptions(self: Arc<Self>) -> Result<(), CacheError> {
         info!("Starting program subscriptions");
 
@@ -425,36 +417,33 @@ impl MarketCache {
                 let keyed_account = response.value;
 
                 if let Ok(pubkey) = Pubkey::from_str(&keyed_account.pubkey) {
-                    if let UiAccountData::Binary(data_str, encoding) = keyed_account.account.data {
-                        if let Some(data) = Self::decode_account_data(&data_str, encoding) {
-                            if let Ok(owner) = Pubkey::from_str(&keyed_account.account.owner) {
-                                let account = MarketAccount::from((
-                                    pubkey,
-                                    Account {
-                                        lamports: keyed_account.account.lamports,
-                                        data,
-                                        owner,
-                                        executable: keyed_account.account.executable,
-                                        rent_epoch: keyed_account.account.rent_epoch,
-                                    },
-                                ));
+                    if let Some(data) = keyed_account.account.data.decode() {
+                        if let Ok(owner) = Pubkey::from_str(&keyed_account.account.owner) {
+                            let account = MarketAccount::from((
+                                pubkey,
+                                Account {
+                                    lamports: keyed_account.account.lamports,
+                                    data,
+                                    owner,
+                                    executable: keyed_account.account.executable,
+                                    rent_epoch: keyed_account.account.rent_epoch,
+                                },
+                            ));
 
-                                let market =
-                                    self_clone.markets.read().await.get(&program_id).cloned();
-                                if let Some(mut accounts) = market {
-                                    counter += 1;
-                                    //if counter % 100 == 0 {
-                                    //    info!("Processed {:?}", account);
-                                    //}
+                            let market = self_clone.markets.read().await.get(&program_id).cloned();
+                            if let Some(mut accounts) = market {
+                                counter += 1;
+                                //if counter % 100 == 0 {
+                                //    info!("Processed {:?}", account);
+                                //}
 
-                                    accounts.retain(|a| a.pubkey != Some(pubkey));
-                                    accounts.insert(account);
-                                    self_clone
-                                        .markets
-                                        .write()
-                                        .await
-                                        .insert(program_id, accounts);
-                                }
+                                accounts.retain(|a| a.pubkey != Some(pubkey));
+                                accounts.insert(account);
+                                self_clone
+                                    .markets
+                                    .write()
+                                    .await
+                                    .insert(program_id, accounts);
                             }
                         }
                     }

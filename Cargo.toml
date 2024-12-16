@@ -8,6 +8,7 @@ anyhow = "1.0"
 axum = { version = "0.7" }
 axum-macros = "0.4"
 base64 = "0.22"
+bs58 = "0.5"
 chrono = "0.4"
 futures = "0.3"
 metrics = "0.24"
@@ -20,6 +21,7 @@ serde_json = "1"
 solana-account-decoder-client-types = "2"
 solana-client = { version = "2" }
 solana-program = { version = "2" }
+solana-pubsub-client = "2"
 solana-sdk = { version = "2" }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

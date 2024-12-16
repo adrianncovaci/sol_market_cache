@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
 
     let config = CacheConfig::default();
     let cache = MarketCache::new(
-        "http://localhost".to_string(),
+        "http://84.32.186.51:8899".to_string(),
         indexed_pubkeys,
         "redis://localhost".to_string(),
         Some(config),

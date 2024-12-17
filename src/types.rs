@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use borsh::BorshDeserialize;
+use serde::Serialize;
 use solana_program::pubkey::Pubkey;
 use std::{
     sync::{atomic::AtomicU64, Arc},
@@ -8,7 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::error::CacheError;
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Hash)]
 pub struct MarketAccount {
     pub pubkey: Option<Pubkey>,
     pub lamports: Option<u64>,
@@ -21,26 +22,6 @@ pub struct MarketAccount {
     pub params: Option<AccountParams>,
     #[serde(skip)]
     pub last_updated: Option<Instant>,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
-pub struct AccountParams {
-    #[serde(rename = "addressLookupTableAddress")]
-    pub address_lookup_table_address: Option<String>,
-    #[serde(rename = "routingGroup")]
-    pub routing_group: Option<u8>,
-    #[serde(rename = "serumAsks")]
-    pub serum_asks: Option<String>,
-    #[serde(rename = "serumBids")]
-    pub serum_bids: Option<String>,
-    #[serde(rename = "serumCoinVaultAccount")]
-    pub serum_coin_vault_account: Option<String>,
-    #[serde(rename = "serumEventQueue")]
-    pub serum_event_queue: Option<String>,
-    #[serde(rename = "serumPcVaultAccount")]
-    pub serum_pc_vault_account: Option<String>,
-    #[serde(rename = "serumVaultSigner")]
-    pub serum_vault_signer: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,4 +70,16 @@ impl RedisConfig {
             last_updated: None,
         })
     }
+}
+
+#[derive(Debug, Serialize, BorshDeserialize, PartialEq, Eq, Clone, Hash)]
+pub struct AccountParams {
+    pub routing_group: u8,
+    pub address_lookup_table: Pubkey,
+    pub serum_asks: Pubkey,
+    pub serum_bids: Pubkey,
+    pub serum_coin_vault: Pubkey,
+    pub serum_event_queue: Pubkey,
+    pub serum_pc_vault: Pubkey,
+    pub serum_vault_signer: Pubkey,
 }

@@ -2200,6 +2200,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-macros",
+ "borsh 1.5.3",
  "chrono",
  "futures",
  "metrics",

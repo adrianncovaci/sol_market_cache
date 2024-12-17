@@ -2,7 +2,7 @@ use futures::future::join_all;
 use futures::StreamExt;
 use metrics::{counter, gauge};
 use redis::AsyncCommands;
-use solana_account_decoder_client_types::{UiAccountData, UiAccountEncoding, UiDataSliceConfig};
+use solana_account_decoder_client_types::{UiAccountEncoding, UiDataSliceConfig};
 use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::error::CacheError;
-use crate::types::{CacheConfig, MarketAccount, RedisConfig};
+use crate::types::{AccountParams, CacheConfig, MarketAccount, RedisConfig};
 
 pub struct MarketCache {
     markets: Arc<RwLock<HashMap<Pubkey, HashSet<MarketAccount>>>>,
@@ -27,8 +27,8 @@ pub struct MarketCache {
     redis_config: RedisConfig,
 }
 
-impl From<(Pubkey, Account)> for MarketAccount {
-    fn from((pubkey, account): (Pubkey, Account)) -> Self {
+impl From<(Pubkey, Account, Option<AccountParams>)> for MarketAccount {
+    fn from((pubkey, account, params): (Pubkey, Account, Option<AccountParams>)) -> Self {
         MarketAccount {
             pubkey: Some(pubkey),
             lamports: Some(account.lamports),
@@ -37,8 +37,8 @@ impl From<(Pubkey, Account)> for MarketAccount {
             owner: Some(account.owner),
             executable: Some(account.executable),
             rent_epoch: Some(account.rent_epoch),
-            params: None,
             last_updated: Some(Instant::now()),
+            params,
         }
     }
 }
@@ -103,7 +103,7 @@ impl MarketCache {
                 Ok(accounts) => {
                     let market_accounts: Vec<MarketAccount> = accounts
                         .into_iter()
-                        .map(|(pubkey, account)| MarketAccount::from((pubkey, account)))
+                        .map(|(pubkey, account)| MarketAccount::from((pubkey, account, None)))
                         .collect();
 
                     info!(
@@ -231,95 +231,6 @@ impl MarketCache {
         Ok(())
     }
 
-    //async fn start_subscriptions(self: Arc<Self>) -> Result<(), CacheError> {
-    //    info!("Starting program subscriptions");
-
-    //    let pubkeys = self.pubkeys_index.read().await.clone();
-    //    let ws_url = self
-    //        .rpc_client
-    //        .url()
-    //        .replace("http://", "ws://")
-    //        .replace("https://", "wss://");
-
-    //    let pubsub_client = Arc::new(
-    //        PubsubClient::new(&ws_url)
-    //            .await
-    //            .map_err(|e| CacheError::WSError(e))?,
-    //    );
-    //
-    //    let mut subscriptions: HashMap<Pubkey, (Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>, UnboundedReceiver<Response<RpcKeyedAccount>>)> = HashMap::new();
-
-    //    for program_id in pubkeys {
-    //        let self_clone = self.clone();
-    //        let pubsub_client = Arc::clone(&pubsub_client);
-
-    //        let config = RpcAccountInfoConfig {
-    //            encoding: Some(UiAccountEncoding::Base64),
-    //            data_slice: Some(UiDataSliceConfig {
-    //                offset: 0,
-    //                length: 100,
-    //            }),
-    //            commitment: Some(CommitmentConfig::confirmed()),
-    //            min_context_slot: None,
-    //        };
-
-    //        let program_config = RpcProgramAccountsConfig {
-    //            filters: None,
-    //            account_config: config,
-    //            with_context: Some(true),
-    //            sort_results: Some(false),
-    //        };
-
-    //        match pubsub_client.program_subscribe(&program_id, Some(program_config)).await {
-    //            Ok((mut notifications, subscription)) => {
-    //                info!("Successfully subscribed to program {}", program_id);
-    //
-    //                let (sender, receiver) = mpsc::unbounded_channel();
-    //
-    //                subscriptions.insert(program_id, (subscription, receiver));
-
-    //                // Process notifications
-    //                while let Some(response) = notifications.next().await {
-    //                    let keyed_account = response.value;
-    //
-    //                    // Convert string pubkey to Pubkey
-    //                    if let Ok(pubkey) = Pubkey::from_str(&keyed_account.pubkey) {
-    //                        // Convert UiAccount data to Vec<u8>
-    //                        if let UiAccountData::Binary(data_str, encoding) = keyed_account.account.data {
-    //                            if let Some(data) = Self::decode_account_data(&data_str, encoding) {
-    //                                // Convert string owner to Pubkey
-    //                                if let Ok(owner) = Pubkey::from_str(&keyed_account.account.owner) {
-    //                                    let account = MarketAccount::from((
-    //                                        pubkey,
-    //                                        Account {
-    //                                            lamports: keyed_account.account.lamports,
-    //                                            data,
-    //                                            owner,
-    //                                            executable: keyed_account.account.executable,
-    //                                            rent_epoch: keyed_account.account.rent_epoch,
-    //                                        }
-    //                                    ));
-
-    //                                    let mut markets = self_clone.markets.write().await;
-    //                                    if let Some(accounts) = markets.get_mut(&program_id) {
-    //                                        accounts.retain(|a| a.pubkey != Some(pubkey));
-    //                                        accounts.insert(account);
-    //                                    }
-    //                                }
-    //                            }
-    //                        }
-    //                    }
-    //                }
-    //            }
-    //            Err(e) => {
-    //                error!("Failed to subscribe to program {}: {:?}", program_id, e);
-    //            }
-    //        };
-    //    }
-
-    //    Ok(())
-    //}
-
     pub async fn start_background_refresh(self: Arc<Self>) {
         info!("Starting background refresh and subscriptions");
 
@@ -353,8 +264,15 @@ impl MarketCache {
         // Create a channel for handling subscription updates
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
 
+        let pubsub_client = Arc::new(
+            PubsubClient::new(&ws_url)
+                .await
+                .expect("Failed to create PubsubClient"),
+        );
+
         // Spawn a separate task for WebSocket connection and subscription handling
         for program_id in pubkeys {
+            let client = pubsub_client.clone();
             let ws_url = ws_url.clone();
             let update_tx = update_tx.clone();
             let config = RpcProgramAccountsConfig {
@@ -374,35 +292,24 @@ impl MarketCache {
 
             tokio::spawn(async move {
                 loop {
-                    match PubsubClient::new(&ws_url).await {
-                        Ok(pubsub_client) => {
-                            match pubsub_client
-                                .program_subscribe(&program_id, Some(config.clone()))
-                                .await
-                            {
-                                Ok((mut notifications, _unsubscribe)) => {
-                                    info!("Successfully subscribed to program {}", program_id);
+                    match client
+                        .program_subscribe(&program_id, Some(config.clone()))
+                        .await
+                    {
+                        Ok((mut notifications, _unsubscribe)) => {
+                            info!("Successfully subscribed to program {}", program_id);
 
-                                    while let Some(notification) = notifications.next().await {
-                                        if update_tx.send((program_id, notification)).is_err() {
-                                            error!("Failed to send update to channel");
-                                            break;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to subscribe to program {}: {:?}",
-                                        program_id, e
-                                    );
+                            while let Some(notification) = notifications.next().await {
+                                if update_tx.send((program_id, notification)).is_err() {
+                                    error!("Failed to send update to channel");
+                                    break;
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to create WebSocket connection: {:?}", e);
+                            error!("Failed to subscribe to program {}: {:?}", program_id, e);
                         }
                     }
-
                     // Wait before attempting to reconnect
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
@@ -419,6 +326,8 @@ impl MarketCache {
                 if let Ok(pubkey) = Pubkey::from_str(&keyed_account.pubkey) {
                     if let Some(data) = keyed_account.account.data.decode() {
                         if let Ok(owner) = Pubkey::from_str(&keyed_account.account.owner) {
+                            let params = extract_market_params(&data, &owner);
+
                             let account = MarketAccount::from((
                                 pubkey,
                                 Account {
@@ -428,14 +337,15 @@ impl MarketCache {
                                     executable: keyed_account.account.executable,
                                     rent_epoch: keyed_account.account.rent_epoch,
                                 },
+                                params,
                             ));
 
                             let market = self_clone.markets.read().await.get(&program_id).cloned();
                             if let Some(mut accounts) = market {
                                 counter += 1;
-                                //if counter % 100 == 0 {
-                                //    info!("Processed {:?}", account);
-                                //}
+                                if counter % 100 == 0 {
+                                    info!("Processed {:?}", account.params);
+                                }
 
                                 accounts.retain(|a| a.pubkey != Some(pubkey));
                                 accounts.insert(account);
@@ -453,4 +363,76 @@ impl MarketCache {
 
         Ok(())
     }
+}
+
+const ACCOUNT_HEAD_PADDING: &[u8; 5] = b"serum";
+const ACCOUNT_TAIL_PADDING: &[u8; 7] = b"padding";
+
+pub fn extract_market_params(data: &[u8], owner: &Pubkey) -> Option<AccountParams> {
+    // Check minimum length and header/footer padding
+    if data.len() < (ACCOUNT_HEAD_PADDING.len() + ACCOUNT_TAIL_PADDING.len() + 47 * 8) {
+        return None;
+    }
+
+    // Verify header padding
+    if &data[..ACCOUNT_HEAD_PADDING.len()] != ACCOUNT_HEAD_PADDING {
+        return None;
+    }
+
+    // Verify footer padding
+    let footer_start = data.len() - ACCOUNT_TAIL_PADDING.len();
+    if &data[footer_start..] != ACCOUNT_TAIL_PADDING {
+        return None;
+    }
+
+    // Skip the header to get to market data
+    let market_data = &data[ACCOUNT_HEAD_PADDING.len()..footer_start];
+
+    // Helper function to convert [u8; 32] to Pubkey
+    let try_create_pubkey = |offset: usize| {
+        let start = offset * 8;
+        let end = start + 32;
+        if end <= market_data.len() {
+            let mut bytes = [0u8; 32];
+            bytes.copy_from_slice(&market_data[start..end]);
+            Some(Pubkey::new_from_array(bytes))
+        } else {
+            None
+        }
+    };
+
+    // Extract pubkeys using the correct offsets from MarketState
+    // Note: The offsets are relative to the start of market_data
+    let own_address = try_create_pubkey(1)?; // own_address offset is 1
+    let asks = try_create_pubkey(39)?; // asks offset is 39
+    let bids = try_create_pubkey(35)?; // bids offset is 35
+    let event_q = try_create_pubkey(31)?; // event_q offset is 31
+    let coin_vault = try_create_pubkey(14)?; // coin_vault offset is 14
+    let pc_vault = try_create_pubkey(20)?; // pc_vault offset is 20
+
+    // Get vault signer nonce (offset 5)
+    let nonce_start = 5 * 8;
+    let nonce_end = nonce_start + 8;
+    if nonce_end > market_data.len() {
+        return None;
+    }
+    let vault_signer_nonce =
+        u64::from_le_bytes(market_data[nonce_start..nonce_end].try_into().ok()?);
+
+    // Derive vault signer
+    let (vault_signer, _bump) = Pubkey::find_program_address(
+        &[own_address.as_ref(), &vault_signer_nonce.to_le_bytes()],
+        owner,
+    );
+
+    Some(AccountParams {
+        routing_group: 0,                        // Default value
+        address_lookup_table: Pubkey::default(), // Default value
+        serum_asks: asks,
+        serum_bids: bids,
+        serum_coin_vault: coin_vault,
+        serum_event_queue: event_q,
+        serum_pc_vault: pc_vault,
+        serum_vault_signer: vault_signer,
+    })
 }

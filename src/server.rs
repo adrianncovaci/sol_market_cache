@@ -19,7 +19,7 @@ pub async fn serve(cache: Arc<MarketCache>) -> Result<()> {
 
     let listener = TcpListener::bind(addr)
         .await
-        .context("Failed to bind to address")?;
+        .context("`Server::serve`: Failed to bind to address")?;
 
     info!("Server listening on {}", addr);
 

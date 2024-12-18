@@ -2205,6 +2205,7 @@ dependencies = [
  "futures",
  "metrics",
  "metrics-exporter-prometheus",
+ "rand 0.8.5",
  "redis",
  "reqwest 0.12.9",
  "serde",

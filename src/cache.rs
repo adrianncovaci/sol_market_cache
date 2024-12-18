@@ -250,7 +250,6 @@ impl MarketCache {
 
     async fn start_subscriptions(self: Arc<Self>) -> Result<(), CacheError> {
         info!("Starting program subscriptions");
-
         let pubkeys = self.pubkeys_index.read().await.clone();
         let ws_url = self
             .rpc_client
@@ -264,15 +263,8 @@ impl MarketCache {
         // Create a channel for handling subscription updates
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
 
-        let pubsub_client = Arc::new(
-            PubsubClient::new(&ws_url)
-                .await
-                .expect("Failed to create PubsubClient"),
-        );
-
-        // Spawn a separate task for WebSocket connection and subscription handling
+        // Spawn a separate task for each WebSocket connection and subscription
         for program_id in pubkeys {
-            let client = pubsub_client.clone();
             let ws_url = ws_url.clone();
             let update_tx = update_tx.clone();
             let config = RpcProgramAccountsConfig {
@@ -292,26 +284,46 @@ impl MarketCache {
 
             tokio::spawn(async move {
                 loop {
-                    match client
-                        .program_subscribe(&program_id, Some(config.clone()))
-                        .await
-                    {
-                        Ok((mut notifications, _unsubscribe)) => {
-                            info!("Successfully subscribed to program {}", program_id);
+                    match PubsubClient::new(&ws_url).await {
+                        Ok(client) => {
+                            match client
+                                .program_subscribe(&program_id, Some(config.clone()))
+                                .await
+                            {
+                                Ok((mut notifications, _unsubscribe)) => {
+                                    info!("Successfully subscribed to program {}", program_id);
 
-                            while let Some(notification) = notifications.next().await {
-                                if update_tx.send((program_id, notification)).is_err() {
-                                    error!("Failed to send update to channel");
-                                    break;
+                                    // Process notifications until connection drops
+                                    while let Some(notification) = notifications.next().await {
+                                        if update_tx.send((program_id, notification)).is_err() {
+                                            error!("Failed to send update to channel");
+                                            break;
+                                        }
+                                    }
+
+                                    // If we get here, the connection was lost
+                                    error!(
+                                        "Lost connection to program {}, attempting to reconnect",
+                                        program_id
+                                    );
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to subscribe to program {}: {:?}",
+                                        program_id, e
+                                    );
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to subscribe to program {}: {:?}", program_id, e);
+                            error!(
+                                "Failed to create client for program {}: {:?}",
+                                program_id, e
+                            );
                         }
                     }
-                    // Wait before attempting to reconnect
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let jitter = Duration::from_millis(rand::random::<u64>() % 500);
+                    tokio::time::sleep(jitter).await;
                 }
             });
         }
@@ -324,9 +336,13 @@ impl MarketCache {
                 let keyed_account = response.value;
 
                 if let Ok(pubkey) = Pubkey::from_str(&keyed_account.pubkey) {
+                    info!("Processing account: {}", pubkey);
                     if let Some(data) = keyed_account.account.data.decode() {
+                        info!("Decoded data length: {}", data.len());
                         if let Ok(owner) = Pubkey::from_str(&keyed_account.account.owner) {
+                            info!("Account owner: {}", owner);
                             let params = extract_market_params(&data, &owner);
+                            info!("Extracted params: {:?}", params);
 
                             let account = MarketAccount::from((
                                 pubkey,
@@ -371,53 +387,94 @@ const ACCOUNT_TAIL_PADDING: &[u8; 7] = b"padding";
 pub fn extract_market_params(data: &[u8], owner: &Pubkey) -> Option<AccountParams> {
     // Check minimum length and header/footer padding
     if data.len() < (ACCOUNT_HEAD_PADDING.len() + ACCOUNT_TAIL_PADDING.len() + 47 * 8) {
+        info!("Data length too short: {}", data.len());
         return None;
     }
 
     // Verify header padding
     if &data[..ACCOUNT_HEAD_PADDING.len()] != ACCOUNT_HEAD_PADDING {
+        info!("Invalid header padding");
         return None;
     }
 
     // Verify footer padding
     let footer_start = data.len() - ACCOUNT_TAIL_PADDING.len();
     if &data[footer_start..] != ACCOUNT_TAIL_PADDING {
+        info!("Invalid footer padding");
         return None;
     }
 
     // Skip the header to get to market data
     let market_data = &data[ACCOUNT_HEAD_PADDING.len()..footer_start];
+    info!("Market data length: {}", market_data.len());
 
-    // Helper function to convert [u8; 32] to Pubkey
+    // Helper function to convert [u8; 32] to Pubkey with info logging
     let try_create_pubkey = |offset: usize| {
         let start = offset * 8;
         let end = start + 32;
         if end <= market_data.len() {
             let mut bytes = [0u8; 32];
             bytes.copy_from_slice(&market_data[start..end]);
-            Some(Pubkey::new_from_array(bytes))
+            let pubkey = Pubkey::new_from_array(bytes);
+            info!("Created pubkey at offset {}: {}", offset, pubkey);
+            Some(pubkey)
         } else {
+            info!(
+                "Failed to create pubkey at offset {}: out of bounds",
+                offset
+            );
             None
         }
     };
 
-    // Extract pubkeys using the correct offsets from MarketState
-    // Note: The offsets are relative to the start of market_data
-    let own_address = try_create_pubkey(1)?; // own_address offset is 1
-    let asks = try_create_pubkey(39)?; // asks offset is 39
-    let bids = try_create_pubkey(35)?; // bids offset is 35
-    let event_q = try_create_pubkey(31)?; // event_q offset is 31
-    let coin_vault = try_create_pubkey(14)?; // coin_vault offset is 14
-    let pc_vault = try_create_pubkey(20)?; // pc_vault offset is 20
+    // Extract pubkeys with logging
+    let own_address = try_create_pubkey(1).or_else(|| {
+        info!("Failed to extract own_address");
+        None
+    })?;
 
-    // Get vault signer nonce (offset 5)
+    let asks = try_create_pubkey(39).or_else(|| {
+        info!("Failed to extract asks");
+        None
+    })?;
+
+    let bids = try_create_pubkey(35).or_else(|| {
+        info!("Failed to extract bids");
+        None
+    })?;
+
+    let event_q = try_create_pubkey(31).or_else(|| {
+        info!("Failed to extract event_q");
+        None
+    })?;
+
+    let coin_vault = try_create_pubkey(14).or_else(|| {
+        info!("Failed to extract coin_vault");
+        None
+    })?;
+
+    let pc_vault = try_create_pubkey(20).or_else(|| {
+        info!("Failed to extract pc_vault");
+        None
+    })?;
+
+    // Get vault signer nonce with logging
     let nonce_start = 5 * 8;
     let nonce_end = nonce_start + 8;
     if nonce_end > market_data.len() {
+        info!("Failed to extract vault signer nonce: out of bounds");
         return None;
     }
-    let vault_signer_nonce =
-        u64::from_le_bytes(market_data[nonce_start..nonce_end].try_into().ok()?);
+
+    let vault_signer_nonce = match market_data[nonce_start..nonce_end].try_into() {
+        Ok(bytes) => u64::from_le_bytes(bytes),
+        Err(_) => {
+            info!("Failed to convert vault signer nonce bytes");
+            return None;
+        }
+    };
+
+    info!("Vault signer nonce: {}", vault_signer_nonce);
 
     // Derive vault signer
     let (vault_signer, _bump) = Pubkey::find_program_address(
@@ -425,14 +482,19 @@ pub fn extract_market_params(data: &[u8], owner: &Pubkey) -> Option<AccountParam
         owner,
     );
 
-    Some(AccountParams {
-        routing_group: 0,                        // Default value
-        address_lookup_table: Pubkey::default(), // Default value
+    info!("Derived vault signer: {}", vault_signer);
+
+    let params = AccountParams {
+        routing_group: 0,
+        address_lookup_table: Pubkey::default(),
         serum_asks: asks,
         serum_bids: bids,
         serum_coin_vault: coin_vault,
         serum_event_queue: event_q,
         serum_pc_vault: pc_vault,
         serum_vault_signer: vault_signer,
-    })
+    };
+
+    info!("Successfully extracted market params");
+    Some(params)
 }

@@ -2,10 +2,12 @@ use futures::future::join_all;
 use futures::StreamExt;
 use metrics::{counter, gauge};
 use redis::AsyncCommands;
+use serde_json::{json, Value};
 use solana_account_decoder_client_types::{UiAccountEncoding, UiDataSliceConfig};
 use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
+use solana_client::rpc_filter::RpcFilterType;
 use solana_program::pubkey::Pubkey;
 use solana_sdk::{account::Account, commitment_config::CommitmentConfig};
 use std::collections::HashMap;
@@ -18,6 +20,35 @@ use tracing::{error, info, warn};
 
 use crate::error::CacheError;
 use crate::types::{AccountParams, CacheConfig, MarketAccount, RedisConfig};
+
+use base64::{engine::general_purpose::STANDARD as base64_engine, Engine};
+
+use bytemuck::{Pod, Zeroable};
+
+#[derive(Copy, Clone, Pod, Zeroable, Debug)]
+#[repr(C)]
+pub struct MarketState {
+    pub account_flags: u64,
+    pub own_address: [u64; 4],
+    pub vault_signer_nonce: u64,
+    pub coin_mint: [u64; 4],
+    pub pc_mint: [u64; 4],
+    pub coin_vault: [u64; 4],
+    pub coin_deposits_total: u64,
+    pub coin_fees_accrued: u64,
+    pub pc_vault: [u64; 4],
+    pub pc_deposits_total: u64,
+    pub pc_fees_accrued: u64,
+    pub pc_dust_threshold: u64,
+    pub req_q: [u64; 4],
+    pub event_q: [u64; 4],
+    pub bids: [u64; 4],
+    pub asks: [u64; 4],
+    pub coin_lot_size: u64,
+    pub pc_lot_size: u64,
+    pub fee_rate_bps: u64,
+    pub referrer_rebates_accrued: u64,
+}
 
 pub struct MarketCache {
     markets: Arc<RwLock<HashMap<Pubkey, HashSet<MarketAccount>>>>,
@@ -59,7 +90,7 @@ impl MarketCache {
 
         let redis_config = RedisConfig::new(
             redis_url,
-            Duration::from_secs(60 * 60),
+            Duration::from_secs(24 * 60 * 60),
             Duration::from_secs(15 * 60),
         )
         .await?;
@@ -77,34 +108,56 @@ impl MarketCache {
     }
 
     async fn fetch_market(&self, program_id: Pubkey) -> Result<Vec<MarketAccount>, CacheError> {
-        let config = RpcProgramAccountsConfig {
-            filters: None,
-            account_config: RpcAccountInfoConfig {
-                encoding: Some(UiAccountEncoding::Base64),
-                data_slice: Some(UiDataSliceConfig {
-                    offset: 0,
-                    length: 100,
-                }),
-                commitment: Some(CommitmentConfig::confirmed()),
-                min_context_slot: None,
-            },
-            with_context: Some(true),
-            sort_results: Some(false),
-        };
-
         let mut retries = 0;
         let timestamp = Instant::now();
 
         loop {
+            let config = if program_id.to_string() == "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX"
+            {
+                RpcProgramAccountsConfig {
+                    filters: Some(vec![
+                        RpcFilterType::DataSize(388), // Serum market state size
+                    ]),
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        data_slice: None,
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        min_context_slot: None,
+                    },
+                    with_context: Some(true),
+                    sort_results: Some(false),
+                }
+            } else {
+                RpcProgramAccountsConfig {
+                    filters: None,
+                    account_config: RpcAccountInfoConfig {
+                        encoding: Some(UiAccountEncoding::Base64),
+                        data_slice: None,
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        min_context_slot: None,
+                    },
+                    with_context: Some(true),
+                    sort_results: Some(false),
+                }
+            };
             match self
                 .rpc_client
                 .get_program_accounts_with_config(&program_id, config.clone())
             {
                 Ok(accounts) => {
+                    info!("OWNER: {}", program_id);
                     let market_accounts: Vec<MarketAccount> = accounts
                         .into_iter()
-                        .map(|(pubkey, account)| MarketAccount::from((pubkey, account, None)))
+                        .map(|(pubkey, account)| {
+                            let market_params = extract_market_params(&account.data, &program_id);
+                            MarketAccount::from((pubkey, account, market_params))
+                        })
                         .collect();
+
+                    info!(
+                        "First account: {:?}",
+                        market_accounts.iter().find(|mk| mk.params.is_some())
+                    );
 
                     info!(
                         "Fetched {} accounts for program {}, took {} seconds",
@@ -241,6 +294,9 @@ impl MarketCache {
         }
 
         info!("Initial cache population complete, starting subscriptions");
+        info!("Storing valid markets in Jupiter format");
+
+        self.export_to_jupiter_format().await.unwrap();
 
         // Then start the subscriptions
         if let Err(e) = self.clone().start_subscriptions().await {
@@ -271,10 +327,7 @@ impl MarketCache {
                 filters: None,
                 account_config: RpcAccountInfoConfig {
                     encoding: Some(UiAccountEncoding::Base64),
-                    data_slice: Some(UiDataSliceConfig {
-                        offset: 0,
-                        length: 100,
-                    }),
+                    data_slice: None,
                     commitment: Some(CommitmentConfig::confirmed()),
                     min_context_slot: None,
                 },
@@ -336,14 +389,9 @@ impl MarketCache {
                 let keyed_account = response.value;
 
                 if let Ok(pubkey) = Pubkey::from_str(&keyed_account.pubkey) {
-                    info!("Processing account: {}", pubkey);
                     if let Some(data) = keyed_account.account.data.decode() {
-                        info!("Decoded data length: {}", data.len());
                         if let Ok(owner) = Pubkey::from_str(&keyed_account.account.owner) {
-                            info!("Account owner: {}", owner);
                             let params = extract_market_params(&data, &owner);
-                            info!("Extracted params: {:?}", params);
-
                             let account = MarketAccount::from((
                                 pubkey,
                                 Account {
@@ -355,6 +403,9 @@ impl MarketCache {
                                 },
                                 params,
                             ));
+                            if account.params.is_some() {
+                                info!("Account: {:?}", account);
+                            }
 
                             let market = self_clone.markets.read().await.get(&program_id).cloned();
                             if let Some(mut accounts) = market {
@@ -379,122 +430,133 @@ impl MarketCache {
 
         Ok(())
     }
+
+    pub async fn export_to_jupiter_format(&self) -> Result<Value, CacheError> {
+        let mut jupiter_markets = Vec::new();
+
+        for (_program_id, market_set) in self.get_markets().await {
+            info!(
+                "Processing program: {} len - {}, legit: {}",
+                _program_id,
+                market_set.len(),
+                market_set.iter().filter(|x| x.params.is_some()).count()
+            );
+            for market in market_set {
+                if let (Some(pubkey), Some(owner), Some(params)) =
+                    (market.pubkey, market.owner, market.params)
+                {
+                    let data_base64 = base64_engine.encode(&market.data);
+
+                    let market_entry = json!({
+                        "pubkey": pubkey.to_string(),
+                        "lamports": market.lamports,
+                        "data": [data_base64, "base64"],
+                        "owner": market.owner.map(|x| x.to_string()),
+                        "executable": market.executable,
+                        "rentEpoch": market.rent_epoch,
+                        "space": market.space,
+                        "params": {
+                            "serumBids": params.serum_bids.to_string(),
+                            "serumAsks": params.serum_asks.to_string(),
+                            "serumEventQueue": params.serum_event_queue.to_string(),
+                            "serumCoinVaultAccount": params.serum_coin_vault.to_string(),
+                            "serumPcVaultAccount": params.serum_pc_vault.to_string(),
+                            "serumVaultSigner": params.serum_vault_signer.to_string()
+                        }
+                    });
+                    jupiter_markets.push(market_entry);
+                }
+            }
+        }
+
+        let json_string = serde_json::to_string(&jupiter_markets)?; // Removed pretty printing
+        tokio::fs::write("valid-markets.json", json_string).await?;
+
+        Ok(json!(jupiter_markets))
+    }
 }
 
-const ACCOUNT_HEAD_PADDING: &[u8; 5] = b"serum";
-const ACCOUNT_TAIL_PADDING: &[u8; 7] = b"padding";
-
 pub fn extract_market_params(data: &[u8], owner: &Pubkey) -> Option<AccountParams> {
-    // Check minimum length and header/footer padding
-    if data.len() < (ACCOUNT_HEAD_PADDING.len() + ACCOUNT_TAIL_PADDING.len() + 47 * 8) {
-        info!("Data length too short: {}", data.len());
-        return None;
+    fn u64_to_pubkey(arr: &[u64; 4], field_name: &str) -> Pubkey {
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(bytemuck::bytes_of(arr));
+
+        Pubkey::new_from_array(bytes)
     }
 
-    // Verify header padding
-    if &data[..ACCOUNT_HEAD_PADDING.len()] != ACCOUNT_HEAD_PADDING {
-        info!("Invalid header padding");
-        return None;
-    }
+    if owner.to_string() == "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX" {
+        let state_size = std::mem::size_of::<MarketState>();
 
-    // Verify footer padding
-    let footer_start = data.len() - ACCOUNT_TAIL_PADDING.len();
-    if &data[footer_start..] != ACCOUNT_TAIL_PADDING {
-        info!("Invalid footer padding");
-        return None;
-    }
-
-    // Skip the header to get to market data
-    let market_data = &data[ACCOUNT_HEAD_PADDING.len()..footer_start];
-    info!("Market data length: {}", market_data.len());
-
-    // Helper function to convert [u8; 32] to Pubkey with info logging
-    let try_create_pubkey = |offset: usize| {
-        let start = offset * 8;
-        let end = start + 32;
-        if end <= market_data.len() {
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&market_data[start..end]);
-            let pubkey = Pubkey::new_from_array(bytes);
-            info!("Created pubkey at offset {}: {}", offset, pubkey);
-            Some(pubkey)
-        } else {
-            info!(
-                "Failed to create pubkey at offset {}: out of bounds",
-                offset
-            );
-            None
-        }
-    };
-
-    // Extract pubkeys with logging
-    let own_address = try_create_pubkey(1).or_else(|| {
-        info!("Failed to extract own_address");
-        None
-    })?;
-
-    let asks = try_create_pubkey(39).or_else(|| {
-        info!("Failed to extract asks");
-        None
-    })?;
-
-    let bids = try_create_pubkey(35).or_else(|| {
-        info!("Failed to extract bids");
-        None
-    })?;
-
-    let event_q = try_create_pubkey(31).or_else(|| {
-        info!("Failed to extract event_q");
-        None
-    })?;
-
-    let coin_vault = try_create_pubkey(14).or_else(|| {
-        info!("Failed to extract coin_vault");
-        None
-    })?;
-
-    let pc_vault = try_create_pubkey(20).or_else(|| {
-        info!("Failed to extract pc_vault");
-        None
-    })?;
-
-    // Get vault signer nonce with logging
-    let nonce_start = 5 * 8;
-    let nonce_end = nonce_start + 8;
-    if nonce_end > market_data.len() {
-        info!("Failed to extract vault signer nonce: out of bounds");
-        return None;
-    }
-
-    let vault_signer_nonce = match market_data[nonce_start..nonce_end].try_into() {
-        Ok(bytes) => u64::from_le_bytes(bytes),
-        Err(_) => {
-            info!("Failed to convert vault signer nonce bytes");
+        if data.len() < state_size {
             return None;
         }
-    };
 
-    info!("Vault signer nonce: {}", vault_signer_nonce);
+        if data.len() >= state_size {
+            let state: &MarketState = match bytemuck::try_from_bytes(&data[..state_size]) {
+                Ok(state) => state,
+                Err(_e) => {
+                    return None;
+                }
+            };
 
-    // Derive vault signer
-    let (vault_signer, _bump) = Pubkey::find_program_address(
-        &[own_address.as_ref(), &vault_signer_nonce.to_le_bytes()],
-        owner,
-    );
+            // Add validation checks
+            if state.own_address == [0, 0, 0, 0] || state.vault_signer_nonce == 0 {
+                return None;
+            }
 
-    info!("Derived vault signer: {}", vault_signer);
+            // Convert addresses
+            let bids = u64_to_pubkey(&state.bids, "bids");
+            let asks = u64_to_pubkey(&state.asks, "asks");
 
-    let params = AccountParams {
-        routing_group: 0,
-        address_lookup_table: Pubkey::default(),
-        serum_asks: asks,
-        serum_bids: bids,
-        serum_coin_vault: coin_vault,
-        serum_event_queue: event_q,
-        serum_pc_vault: pc_vault,
-        serum_vault_signer: vault_signer,
-    };
+            // Validate addresses aren't default
+            if bids == Pubkey::default() || asks == Pubkey::default() {
+                return None;
+            }
 
-    info!("Successfully extracted market params");
-    Some(params)
+            if data.len() >= state_size {
+                let state: &MarketState = bytemuck::from_bytes(&data[..state_size]);
+                // Derive vault signer
+                let vault_signer = {
+                    let nonce = state.vault_signer_nonce;
+                    let market = u64_to_pubkey(&state.own_address, "market_address");
+
+                    match Pubkey::create_program_address(
+                        &[market.as_ref(), &nonce.to_le_bytes()],
+                        owner,
+                    ) {
+                        Ok(signer) => signer,
+                        Err(_e) => {
+                            return None;
+                        }
+                    }
+                };
+
+                let bids = u64_to_pubkey(&state.bids, "bids");
+                let asks = u64_to_pubkey(&state.asks, "asks");
+                let event_queue = u64_to_pubkey(&state.event_q, "event_queue");
+                let coin_vault = u64_to_pubkey(&state.coin_vault, "coin_vault");
+                let pc_vault = u64_to_pubkey(&state.pc_vault, "pc_vault");
+
+                if bids == Pubkey::default()
+                    || asks == Pubkey::default()
+                    || event_queue == Pubkey::default()
+                {
+                    return None;
+                }
+
+                return Some(AccountParams {
+                    routing_group: 0,
+                    address_lookup_table: Pubkey::default(),
+                    serum_bids: bids,
+                    serum_asks: asks,
+                    serum_event_queue: event_queue,
+                    serum_coin_vault: coin_vault,
+                    serum_pc_vault: pc_vault,
+                    serum_vault_signer: vault_signer,
+                });
+            } else {
+            }
+        }
+    }
+    None
 }

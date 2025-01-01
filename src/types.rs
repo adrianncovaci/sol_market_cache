@@ -36,7 +36,7 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             refresh_interval: Duration::from_secs(10),
-            request_timeout: Duration::from_secs(10 * 60),
+            request_timeout: Duration::from_secs(60 * 60),
             max_retries: 3,
             retry_delay: Duration::from_secs(1),
         }

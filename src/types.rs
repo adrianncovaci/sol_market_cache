@@ -20,6 +20,8 @@ pub struct MarketAccount {
     pub rent_epoch: Option<u64>,
     pub space: Option<u64>,
     pub params: Option<AccountParams>,
+    pub is_signer: Option<bool>,
+    pub is_writable: Option<bool>,
     #[serde(skip)]
     pub last_updated: Option<Instant>,
 }

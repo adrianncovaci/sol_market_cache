@@ -1,11 +1,8 @@
 use futures::future::join_all;
 use futures::StreamExt;
 use metrics::{counter, gauge};
-use rayon::iter::IndexedParallelIterator;
-use rayon::iter::IntoParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
-use rayon::slice::ParallelSlice;
 use redis::AsyncCommands;
 use serde_json::{json, Value};
 use solana_account_decoder_client_types::UiAccountEncoding;
@@ -14,7 +11,7 @@ use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_client::rpc_filter::RpcFilterType;
 use solana_program::pubkey::Pubkey;
-use solana_sdk::address_lookup_table::state::AddressLookupTable;
+use solana_sdk::clock::Slot;
 use solana_sdk::{account::Account, commitment_config::CommitmentConfig};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -115,7 +112,11 @@ impl MarketCache {
         })
     }
 
-    async fn fetch_market(&self, program_id: Pubkey) -> Result<Vec<MarketAccount>, CacheError> {
+    async fn fetch_market(
+        &self,
+        program_id: Pubkey,
+        min_context_slot: Option<Slot>,
+    ) -> Result<Vec<MarketAccount>, CacheError> {
         let mut retries = 0;
         let outer_timestamp = Instant::now();
 
@@ -130,7 +131,7 @@ impl MarketCache {
                         encoding: Some(UiAccountEncoding::Base64),
                         data_slice: None,
                         commitment: Some(CommitmentConfig::confirmed()),
-                        min_context_slot: None,
+                        min_context_slot,
                     },
                     with_context: Some(true),
                     sort_results: Some(false),
@@ -144,7 +145,7 @@ impl MarketCache {
                         encoding: Some(UiAccountEncoding::Base64),
                         data_slice: None,
                         commitment: Some(CommitmentConfig::confirmed()),
-                        min_context_slot: None,
+                        min_context_slot,
                     },
                     with_context: Some(true),
                     sort_results: Some(false),
@@ -156,7 +157,7 @@ impl MarketCache {
                         encoding: Some(UiAccountEncoding::Base64),
                         data_slice: None,
                         commitment: Some(CommitmentConfig::confirmed()),
-                        min_context_slot: None,
+                        min_context_slot,
                     },
                     with_context: Some(true),
                     sort_results: Some(false),
@@ -351,14 +352,23 @@ impl MarketCache {
     pub async fn update_cache(self: Arc<Self>) -> Result<(), CacheError> {
         info!("Starting market cache update");
 
+        let prev_slot = self.rpc_client.get_slot().ok();
         let pubkeys = self.pubkeys_index.read().await.clone();
         let mut tasks = Vec::new();
+        let self_ref = self.clone();
         for &program_id in pubkeys.iter() {
-            let self_clone = self.clone();
-            let mut interval = tokio::time::interval(self.cache_config.refresh_interval);
+            let self_clone = self_ref.clone();
+            let mut interval = tokio::time::interval(self_clone.cache_config.refresh_interval);
             let task = tokio::spawn(async move {
                 let timestamp = Instant::now();
-                let accounts = self_clone.fetch_market(program_id).await;
+                let slot = match self_clone.get_latest_redis_slot(&program_id).await {
+                    Ok(slot) => slot,
+                    Err(_) => {
+                        error!("Failed to fetch latest slot from Redis");
+                        None
+                    }
+                };
+                let accounts = self_clone.fetch_market(program_id, slot).await;
                 match accounts {
                     Ok(accounts) => {
                         {
@@ -383,11 +393,15 @@ impl MarketCache {
                             if now - last_updated_timestamp
                                 >= self_clone.redis_config.update_duration.as_secs()
                             {
-                                let _ = self_clone.store_in_redis(&program_id, &accounts).await;
+                                let _ = self_clone
+                                    .store_in_redis(&program_id, &accounts, prev_slot)
+                                    .await;
                                 last_updated.store(now, Ordering::Relaxed);
                             }
                         } else {
-                            let _ = self_clone.store_in_redis(&program_id, &accounts).await;
+                            let _ = self_clone
+                                .store_in_redis(&program_id, &accounts, prev_slot)
+                                .await;
                             if let Some(last_updated) = &self_clone.redis_config.last_updated {
                                 let start = SystemTime::now();
                                 let timestamp = start
@@ -419,7 +433,18 @@ impl MarketCache {
         &self,
         program_id: &Pubkey,
         accounts: &[MarketAccount],
+        slot: Option<Slot>,
     ) -> Result<(), CacheError> {
+        if let Some(slot) = slot {
+            self.redis_config
+                .redis_connection
+                .write()
+                .await
+                .set(format!("{}_slot", program_id), slot.to_string())
+                .await
+                .map_err(CacheError::RedisError)?;
+        }
+
         let accounts_json =
             serde_json::to_string(&accounts).map_err(CacheError::SerializationError)?;
 
@@ -437,6 +462,17 @@ impl MarketCache {
             .await
             .expire(
                 program_id.to_string(),
+                self.redis_config.cache_ttl.as_secs() as i64,
+            )
+            .await
+            .map_err(CacheError::RedisError)?;
+
+        self.redis_config
+            .redis_connection
+            .write()
+            .await
+            .expire(
+                format!("{}_slot", program_id),
                 self.redis_config.cache_ttl.as_secs() as i64,
             )
             .await
@@ -636,5 +672,17 @@ impl MarketCache {
         tokio::fs::write("valid-markets.json", json_string).await?;
 
         Ok(json!(jupiter_markets))
+    }
+
+    async fn get_latest_redis_slot(&self, program_id: &Pubkey) -> Result<Option<Slot>, CacheError> {
+        let result: Option<String> = {
+            let mut redis = self.redis_config.redis_connection.write().await;
+            redis
+                .get(format!("{}_slot", program_id))
+                .await
+                .map_err(CacheError::RedisError)?
+        };
+
+        Ok(result.and_then(|s| s.parse().ok()))
     }
 }

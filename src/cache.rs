@@ -8,7 +8,6 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use redis::AsyncCommands;
 use serde_json::{json, Value};
-use sol_account_decoder::{LiquidityState, SerumParams};
 use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_client::rpc_client::RpcClient;

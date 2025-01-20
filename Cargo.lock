@@ -1369,16 +1369,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83c8d82922337cd23a15f88b70d8e4ef5f11da38dd7cdb55e84dd5de99695da0"
 dependencies = [
- "enumflags2_derive 0.6.4",
-]
-
-[[package]]
-name = "enumflags2"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d232db7f5956f3f14313dc2f87985c58bd2c695ce124c8cdd984e08e15ac133d"
-dependencies = [
- "enumflags2_derive 0.7.10",
+ "enumflags2_derive",
 ]
 
 [[package]]
@@ -1390,17 +1381,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "enumflags2_derive"
-version = "0.7.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de0d48a183585823424a4ce1aa132d174a6a81bd540895822eb4c8373a8e49e8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.94",
 ]
 
 [[package]]
@@ -2339,7 +2319,6 @@ dependencies = [
  "borsh 1.5.3",
  "bytemuck",
  "chrono",
- "enumflags2 0.7.10",
  "futures",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2351,9 +2330,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serum",
- "sol_account_decoder",
  "solana-account-decoder-client-types",
- "solana-address-lookup-table-program",
  "solana-client",
  "solana-program 2.1.7",
  "solana-pubsub-client",
@@ -3862,7 +3839,7 @@ dependencies = [
  "bincode",
  "bytemuck",
  "byteorder",
- "enumflags2 0.6.4",
+ "enumflags2",
  "field-offset",
  "itertools 0.9.0",
  "num-traits",
@@ -3995,19 +3972,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sol_account_decoder"
-version = "0.1.0"
-dependencies = [
- "borsh 1.5.3",
- "solana-account-decoder-client-types",
- "solana-address-lookup-table-program",
- "solana-client",
- "solana-program 2.1.7",
- "solana-pubkey",
- "solana-sdk",
-]
-
-[[package]]
 name = "solana-account"
 version = "2.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4074,25 +4038,6 @@ dependencies = [
  "solana-program-error",
  "solana-program-memory",
  "solana-pubkey",
-]
-
-[[package]]
-name = "solana-address-lookup-table-program"
-version = "2.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "164d3fa4db8e29c193a28856a9c5c8f0bbc6232119ee8a4391ee8f41b585573b"
-dependencies = [
- "bincode",
- "bytemuck",
- "log",
- "num-derive 0.4.2",
- "num-traits",
- "solana-feature-set",
- "solana-log-collector",
- "solana-program 2.1.7",
- "solana-program-runtime",
- "solana-sdk",
- "thiserror 1.0.69",
 ]
 
 [[package]]

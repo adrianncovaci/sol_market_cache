@@ -1,5 +1,5 @@
 use borsh::BorshDeserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use solana_program::pubkey::Pubkey;
 use std::{
     sync::{atomic::AtomicU64, Arc},
@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::error::CacheError;
 
-#[derive(Debug, Serialize, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Hash)]
 pub struct MarketAccount {
     pub pubkey: Option<Pubkey>,
     pub lamports: Option<u64>,
@@ -74,7 +74,7 @@ impl RedisConfig {
     }
 }
 
-#[derive(Debug, Serialize, BorshDeserialize, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug, Serialize, Deserialize, BorshDeserialize, PartialEq, Eq, Clone, Hash)]
 pub struct AccountParams {
     pub routing_group: u8,
     pub address_lookup_table: Pubkey,

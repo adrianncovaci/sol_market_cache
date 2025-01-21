@@ -1,6 +1,12 @@
-use crate::{cache::MarketCache, types::MarketAccount};
+use crate::{
+    cache::MarketCache, generate_jupiter::generate_jupiter_endpoint, types::MarketAccount,
+};
 use anyhow::{Context, Result};
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
 use solana_sdk::pubkey::Pubkey;
 use std::{
     collections::{HashMap, HashSet},
@@ -14,6 +20,7 @@ pub async fn serve(cache: Arc<MarketCache>) -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     let app = Router::new()
         .route("/markets", get(get_markets))
+        .route("/jupiter/generate", post(generate_jupiter_endpoint))
         .route("/health", get(health_check))
         .with_state(cache);
 

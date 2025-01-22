@@ -3,6 +3,7 @@ use futures::StreamExt;
 use metrics::{counter, gauge};
 use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
+use redis::streams::StreamReadOptions;
 use redis::AsyncCommands;
 use serde_json::{json, Value};
 use solana_account_decoder_client_types::UiAccountEncoding;
@@ -350,62 +351,62 @@ impl MarketCache {
     }
 
     pub async fn update_cache(self: Arc<Self>) -> Result<(), CacheError> {
-        //info!("Starting market cache update");
-        //let prev_slot = self.rpc_client.get_slot().ok();
-        //let pubkeys = self.pubkeys_index.read().await.clone();
-        //let mut tasks = Vec::new();
-        //let self_ref = self.clone();
-        //for &program_id in pubkeys.iter() {
-        //    let self_clone = self_ref.clone();
-        //    let mut interval = tokio::time::interval(self_clone.cache_config.refresh_interval);
-        //    let task = tokio::spawn(async move {
-        //        let timestamp = Instant::now();
-        //        let slot = match self_clone.get_latest_redis_slot(&program_id).await {
-        //            Ok(slot) => slot,
-        //            Err(_) => {
-        //                error!("Failed to fetch latest slot from Redis");
-        //                None
-        //            }
-        //        };
-        //        let accounts = self_clone.fetch_market(program_id, slot).await;
-        //        match accounts {
-        //            Ok(accounts) => {
-        //                {
-        //                    let mut markets = self_clone.markets.write().await;
-        //                    markets.insert(program_id, accounts.clone().into_iter().collect());
-        //                }
+        info!("Starting market cache update");
+        let prev_slot = self.rpc_client.get_slot().ok();
+        let pubkeys = self.pubkeys_index.read().await.clone();
+        let mut tasks = Vec::new();
+        let self_ref = self.clone();
+        for &program_id in pubkeys.iter() {
+            let self_clone = self_ref.clone();
+            let mut interval = tokio::time::interval(self_clone.cache_config.refresh_interval);
+            let task = tokio::spawn(async move {
+                let timestamp = Instant::now();
+                let slot = match self_clone.get_latest_redis_slot(&program_id).await {
+                    Ok(slot) => slot,
+                    Err(_) => {
+                        error!("Failed to fetch latest slot from Redis");
+                        None
+                    }
+                };
+                let accounts = self_clone.fetch_market(program_id, slot).await;
+                match accounts {
+                    Ok(accounts) => {
+                        {
+                            let mut markets = self_clone.markets.write().await;
+                            markets.insert(program_id, accounts.clone().into_iter().collect());
+                        }
 
-        //                gauge!("cache_update_time").set(timestamp.elapsed().as_secs_f64());
-        //                info!(
-        //                    "Cache update completed in {} seconds for program {}",
-        //                    timestamp.elapsed().as_secs(),
-        //                    program_id
-        //                );
+                        gauge!("cache_update_time").set(timestamp.elapsed().as_secs_f64());
+                        info!(
+                            "Cache update completed in {} seconds for program {}",
+                            timestamp.elapsed().as_secs(),
+                            program_id
+                        );
 
-        //                let _ = self_clone
-        //                    .store_in_redis(&program_id, &accounts, prev_slot)
-        //                    .await;
-        //                let start = SystemTime::now();
-        //                let timestamp = start
-        //                    .duration_since(UNIX_EPOCH)
-        //                    .expect("Time went backwards")
-        //                    .as_secs();
-        //                self_clone
-        //                    .redis_config
-        //                    .last_updated
-        //                    .as_ref()
-        //                    .map(|x| x.store(timestamp, Ordering::Relaxed));
-        //            }
-        //            Err(e) => {
-        //                error!("Failed to fetch market accounts: {:?}", e);
-        //            }
-        //        }
-        //        interval.tick().await;
-        //    });
-        //    tasks.push(task);
-        //}
+                        let _ = self_clone
+                            .store_in_redis(&program_id, &accounts, prev_slot)
+                            .await;
+                        let start = SystemTime::now();
+                        let timestamp = start
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_secs();
+                        self_clone
+                            .redis_config
+                            .last_updated
+                            .as_ref()
+                            .map(|x| x.store(timestamp, Ordering::Relaxed));
+                    }
+                    Err(e) => {
+                        error!("Failed to fetch market accounts: {:?}", e);
+                    }
+                }
+                interval.tick().await;
+            });
+            tasks.push(task);
+        }
 
-        //join_all(tasks).await;
+        join_all(tasks).await;
         Ok(())
     }
 
@@ -419,45 +420,56 @@ impl MarketCache {
         accounts: &[MarketAccount],
         slot: Option<Slot>,
     ) -> Result<(), CacheError> {
-        if let Some(slot) = slot {
-            let slot_key = format!("{}_slot", program_id);
-            let slot_value = slot.to_string();
+        let stream_key = format!("stream:{}", program_id);
+        let slot_key = format!("{}:slot", program_id);
 
-            match {
-                let mut redis_conn = self.redis_config.redis_connection.write().await;
-                redis_conn
-                    .set::<String, String, ()>(slot_key, slot_value)
-                    .await
-            } {
-                Ok(_) => {}
-                Err(err) => {
-                    error!("Failed to store slot in Redis: {:?}", err);
-                    return Err(CacheError::RedisError(err));
-                }
-            }
+        // Store slot if provided
+        if let Some(slot) = slot {
+            let slot_value = slot.to_string();
+            let mut redis_conn = self.redis_config.redis_connection.write().await;
+            redis_conn
+                .set::<String, String, ()>(slot_key.clone(), slot_value)
+                .await
+                .map_err(|e| {
+                    error!("Failed to store slot in Redis: {:?}", e);
+                    CacheError::RedisError(e)
+                })?;
         } else {
             info!("No slot provided for program {}", program_id);
         }
 
-        const CHUNK_SIZE: usize = 10_000;
+        // Process accounts in chunks to avoid huge transactions
+        const CHUNK_SIZE: usize = 1_000;
         let chunks: Vec<_> = accounts.chunks(CHUNK_SIZE).collect();
+
         let chunk_futures = chunks.iter().enumerate().map(|(i, chunk)| {
             let self_clone = self.clone();
-            let program_id = program_id;
+            let stream_key = stream_key.clone();
             let chunk = chunk.to_vec();
 
             async move {
-                let chunk_json =
-                    serde_json::to_string(&chunk).map_err(CacheError::SerializationError)?;
-
+                let mut pipe = redis::pipe();
                 let mut redis_conn = self_clone.redis_config.redis_connection.write().await;
-                redis_conn
-                    .rpush::<String, String, ()>(program_id.to_string(), chunk_json)
-                    .await
-                    .map_err(|e| {
-                        error!("Failed to store chunk {} in Redis: {:?}", i, e);
-                        CacheError::RedisError(e)
-                    })?;
+
+                // Add each market to the stream in the pipeline
+                for market in chunk {
+                    let market_data =
+                        bincode::serialize(&market).map_err(|err| CacheError::Other(err.into()))?;
+
+                    if let Some(pubkey) = &market.pubkey {
+                        pipe.cmd("XADD")
+                            .arg(&stream_key)
+                            .arg("*")
+                            .arg(pubkey.to_string())
+                            .arg(&market_data);
+                    }
+                }
+
+                // Execute pipeline
+                pipe.query_async(&mut *redis_conn).await.map_err(|e| {
+                    error!("Failed to store chunk {} in Redis stream: {:?}", i, e);
+                    CacheError::RedisError(e)
+                })?;
 
                 Ok::<_, CacheError>(())
             }
@@ -466,31 +478,34 @@ impl MarketCache {
         // Process all chunks concurrently
         if let Err(e) = futures::future::try_join_all(chunk_futures).await {
             error!("Error storing chunks for {}: {:?}", program_id, e);
+            return Err(e);
         }
 
-        // Set expiry
+        // Set expiry for both stream and slot keys
         {
             let mut redis_conn = self.redis_config.redis_connection.write().await;
+            let ttl = self.redis_config.cache_ttl.as_secs() as i64;
+
+            // Set TTL for stream
             redis_conn
-                .expire(
-                    program_id.to_string(),
-                    self.redis_config.cache_ttl.as_secs() as i64,
-                )
+                .expire(stream_key, ttl)
                 .await
                 .map_err(CacheError::RedisError)?;
 
+            // Set TTL for slot if it exists
             if slot.is_some() {
                 redis_conn
-                    .expire(
-                        format!("{}_slot", program_id),
-                        self.redis_config.cache_ttl.as_secs() as i64,
-                    )
+                    .expire(slot_key, ttl)
                     .await
                     .map_err(CacheError::RedisError)?;
             }
         }
 
-        info!("Successfully completed storage for {}", program_id);
+        info!(
+            "Successfully completed stream storage for {} with {} accounts",
+            program_id,
+            accounts.len()
+        );
         Ok(())
     }
 
@@ -644,55 +659,84 @@ impl MarketCache {
 
         for &program_id in pubkeys.iter() {
             info!("Fetching program {} from Redis", program_id);
-            if let Ok(chunk_jsons) = self
-                .redis_config
-                .redis_connection
-                .write()
-                .await
-                .lrange::<_, Vec<String>>(program_id.to_string(), 0, -1)
+            let stream_key = format!("stream:{}", program_id);
+
+            // Get all entries from the stream with explicit types
+            let mut redis_conn = self.redis_config.redis_connection.write().await;
+            let stream_data: Vec<(String, Vec<(String, Vec<(String, Vec<u8>)>)>)> = match redis_conn
+                .xread_options(&[&stream_key], &["0"], &StreamReadOptions::default())
                 .await
             {
-                // Deserialize and flatten all chunks
-                let mut accounts = Vec::new();
-                for chunk_json in chunk_jsons {
-                    if let Ok(chunk) = serde_json::from_str::<Vec<MarketAccount>>(&chunk_json) {
-                        accounts.extend(chunk);
-                    }
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Failed to read stream for {}: {:?}", program_id, e);
+                    continue;
                 }
+            };
+
+            // Process stream entries using rayon
+            for (_, entries) in stream_data {
+                let accounts: Vec<_> = entries
+                    .par_iter()
+                    .flat_map(|(_, field_values)| {
+                        // Each entry should have our market data as the only value
+                        if let Some((_, market_data)) = field_values.first() {
+                            match bincode::deserialize::<MarketAccount>(market_data) {
+                                Ok(market) => {
+                                    vec![market]
+                                }
+                                Err(e) => {
+                                    error!("Failed to deserialize market: {}", e);
+                                    vec![]
+                                }
+                            }
+                        } else {
+                            vec![]
+                        }
+                    })
+                    .collect();
 
                 info!(
                     "Found {} markets for program {} in Redis",
                     accounts.len(),
                     program_id
                 );
+
                 if !accounts.is_empty() {
-                    for market in accounts {
-                        if let (Some(pubkey), Some(_), Some(params)) =
-                            (market.pubkey, market.owner, market.params)
-                        {
-                            let data_base64 = base64_engine.encode(&market.data);
-                            let market_entry = json!({
-                                "pubkey": pubkey.to_string(),
-                                "lamports": market.lamports,
-                                "data": [data_base64, "base64"],
-                                "owner": market.owner.map(|x| x.to_string()),
-                                "executable": market.executable,
-                                "rentEpoch": market.rent_epoch,
-                                "space": market.space,
-                                "params": {
-                                    "serumBids": params.serum_bids.to_string(),
-                                    "serumAsks": params.serum_asks.to_string(),
-                                    "serumEventQueue": params.serum_event_queue.to_string(),
-                                    "serumCoinVaultAccount": params.serum_coin_vault.to_string(),
-                                    "serumPcVaultAccount": params.serum_pc_vault.to_string(),
-                                    "serumVaultSigner": params.serum_vault_signer.to_string(),
-                                    "addressLookupTable": params.address_lookup_table.to_string(),
-                                    "routingGroup": params.routing_group
-                                }
-                            });
-                            jupiter_markets.push(market_entry);
-                        }
-                    }
+                    // Process accounts in parallel using rayon
+                    let market_entries: Vec<_> = accounts
+                        .par_iter()
+                        .filter_map(|market| {
+                            if let (Some(pubkey), Some(_), Some(params)) =
+                                (market.pubkey.as_ref(), market.owner.as_ref(), market.params.as_ref())
+                            {
+                                let data_base64 = base64_engine.encode(&market.data);
+                                Some(json!({
+                                    "pubkey": pubkey.to_string(),
+                                    "lamports": market.lamports,
+                                    "data": [data_base64, "base64"],
+                                    "owner": market.owner.as_ref().map(|x| x.to_string()),
+                                    "executable": market.executable,
+                                    "rentEpoch": market.rent_epoch,
+                                    "space": market.space,
+                                    "params": {
+                                        "serumBids": params.serum_bids.to_string(),
+                                        "serumAsks": params.serum_asks.to_string(),
+                                        "serumEventQueue": params.serum_event_queue.to_string(),
+                                        "serumCoinVaultAccount": params.serum_coin_vault.to_string(),
+                                        "serumPcVaultAccount": params.serum_pc_vault.to_string(),
+                                        "serumVaultSigner": params.serum_vault_signer.to_string(),
+                                        "addressLookupTable": params.address_lookup_table.to_string(),
+                                        "routingGroup": params.routing_group
+                                    }
+                                }))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    jupiter_markets.extend(market_entries);
                 }
             }
         }

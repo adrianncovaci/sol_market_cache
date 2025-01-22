@@ -8,6 +8,7 @@ anyhow = "1.0"
 axum = { version = "0.7" }
 axum-macros = "0.4"
 base64 = "0.22"
+bincode = "1"
 borsh = "1"
 bytemuck = "1"
 chrono = "0.4"

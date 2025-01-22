@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 
     let cache = Arc::new(cache);
 
-    cache.clone().start_background_refresh().await;
+    //cache.clone().start_background_refresh().await;
     server::serve(cache).await?;
 
     Ok(())

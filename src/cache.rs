@@ -113,7 +113,7 @@ impl MarketCache {
         })
     }
 
-    async fn fetch_market(
+    pub async fn fetch_market(
         &self,
         program_id: Pubkey,
         min_context_slot: Option<Slot>,

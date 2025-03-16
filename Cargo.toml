@@ -8,6 +8,7 @@ anyhow = "1.0"
 axum = { version = "0.7" }
 axum-macros = "0.4"
 base64 = "0.22"
+bs58 = "0.5"
 bincode = "1"
 borsh = "1"
 bytemuck = "1"
@@ -32,3 +33,6 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+solana-account-decoder = "2"
+spl-token = "7"
